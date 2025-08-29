@@ -1,0 +1,349 @@
+name: Quality & Testing
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  auto-format:
+    name: Auto-fix Formatting
+    runs-on: ubuntu-latest
+    if: github.ref != 'refs/heads/main' && github.event_name != 'pull_request'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.0
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Auto-fix Prettier formatting
+        run: npx prettier --write . --ignore-unknown
+
+      - name: Auto-fix Rust formatting
+        run: cargo fmt --all --manifest-path src-tauri/Cargo.toml
+
+      - name: Commit formatting fixes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add .
+          if ! git diff --staged --quiet; then
+            git commit -m "Auto-fix formatting issues"
+            git push
+          else
+            echo "No formatting changes to commit"
+          fi
+
+  formatting:
+    name: Code Formatting Check
+    runs-on: ubuntu-latest
+    needs: auto-format
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.0
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check EditorConfig compliance
+        uses: editorconfig-checker/action-editorconfig-checker@main
+
+      - name: Run EditorConfig checker with exclusions
+        run: editorconfig-checker -exclude 'Cargo\.lock|dist/.*|.*\.(md|icns|ico|png|jpg|jpeg|gif|svg|desktop|wxs|plist|toml)$|cli\.js$|node_modules/.*|target/.*|src-tauri/(target|icons|png)/.*'
+
+      - name: Check Prettier formatting
+        run: npx prettier --check . --ignore-unknown
+
+  rust-quality:
+    name: Rust Code Quality
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+      fail-fast: false
+    defaults:
+      run:
+        shell: bash
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt, clippy
+
+      - uses: rui314/setup-mold@v1
+        if: matrix.os == 'ubuntu-latest'
+
+      - uses: taiki-e/install-action@v1
+        with:
+          tool: cargo-hack
+
+      - name: Install Ubuntu dependencies
+        if: matrix.os == 'ubuntu-latest'
+        uses: awalsh128/cache-apt-pkgs-action@v1.4.3
+        with:
+          packages: libdbus-1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev gnome-video-effects gnome-video-effects-extra
+          version: 1.0
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --color=always --check
+
+      - name: Run Clippy lints
+        run: cargo hack --feature-powerset --exclude-features cli-build --no-dev-deps clippy
+
+  cli-tests:
+    name: CLI Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+      fail-fast: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.0
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "pnpm"
+
+      - name: Install Rust (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          target: x86_64-unknown-linux-gnu
+
+      - name: Install Rust (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-msvc
+          target: x86_64-pc-windows-msvc
+
+      - name: Install Rust (macOS)
+        if: matrix.os == 'macos-latest'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          target: x86_64-apple-darwin
+
+      - name: Install WIX Toolset (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          # Download and install WIX Toolset v3.11
+          Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/wix3112rtm/wix311.exe" -OutFile "wix311.exe"
+          Start-Process -FilePath "wix311.exe" -ArgumentList "/quiet" -Wait
+
+          # Add WIX to PATH
+          $wixPath = "${env:ProgramFiles(x86)}\WiX Toolset v3.11\bin"
+          if (Test-Path $wixPath) {
+            echo $wixPath >> $env:GITHUB_PATH
+            echo "WIX Toolset installed successfully"
+          } else {
+            echo "Warning: WIX installation path not found"
+          }
+        shell: powershell
+
+      - name: Install system dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        uses: awalsh128/cache-apt-pkgs-action@v1.4.3
+        with:
+          packages: libdbus-1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev gnome-video-effects gnome-video-effects-extra
+          version: 1.1
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build CLI
+        run: pnpm run cli:build
+
+      - name: Run CLI Test Suite
+        run: pnpm test
+        env:
+          CI: true
+          NODE_ENV: test
+
+      - name: Test CLI Integration
+        shell: bash
+        run: |
+          echo "Testing CLI integration with weekly.tw93.fun..."
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            timeout 120s node dist/cli.js https://weekly.tw93.fun --name "CITestWeekly" --debug || true
+          else
+            timeout 30s node dist/cli.js https://weekly.tw93.fun --name "CITestWeekly" --debug || true
+          fi
+          echo "Integration test completed (expected to timeout)"
+
+  release-build-test:
+    name: Release Build Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+      fail-fast: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.0
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "pnpm"
+
+      - name: Install Rust (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          target: x86_64-unknown-linux-gnu
+
+      - name: Install Rust (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-msvc
+          target: x86_64-pc-windows-msvc
+
+      - name: Install Rust (macOS)
+        if: matrix.os == 'macos-latest'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          target: x86_64-apple-darwin
+
+      - name: Add macOS targets
+        if: matrix.os == 'macos-latest'
+        run: |
+          rustup target add aarch64-apple-darwin
+          rustup target add x86_64-apple-darwin
+
+      - name: Install system dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        uses: awalsh128/cache-apt-pkgs-action@v1.4.3
+        with:
+          packages: libdbus-1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev gnome-video-effects gnome-video-effects-extra
+          version: 1.1
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build CLI
+        run: pnpm run cli:build
+
+      - name: Run Release Build Test
+        run: ./tests/release.js
+        timeout-minutes: 30
+        env:
+          CI: true
+          NODE_ENV: test
+
+      - name: List generated files
+        shell: bash
+        run: |
+          echo "Generated files in project root:"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            ls -la *.{dmg,app,msi,deb,AppImage} 2>/dev/null || echo "No direct output files found"
+          else
+            find . -maxdepth 1 \( -name "*.dmg" -o -name "*.app" -o -name "*.msi" -o -name "*.deb" -o -name "*.AppImage" \) || echo "No direct output files found"
+          fi
+          echo ""
+          echo "Generated files in target directories:"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            find src-tauri/target -type f \( -name "*.dmg" -o -name "*.app" -o -name "*.msi" -o -name "*.deb" -o -name "*.AppImage" \) 2>/dev/null || echo "No target output files found"
+          else
+            find src-tauri/target -name "*.dmg" -o -name "*.app" -o -name "*.msi" -o -name "*.deb" -o -name "*.AppImage" 2>/dev/null || echo "No target output files found"
+          fi
+
+  summary:
+    name: Quality Summary
+    runs-on: ubuntu-latest
+    needs: [formatting, rust-quality, cli-tests, release-build-test]
+    if: always()
+    steps:
+      - name: Generate Summary
+        run: |
+          echo "# Quality & Testing Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ needs.formatting.result }}" == "success" ]; then
+            echo "✅ **Code Formatting**: PASSED" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Code Formatting**: FAILED" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ "${{ needs.rust-quality.result }}" == "success" ]; then
+            echo "✅ **Rust Quality**: PASSED" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Rust Quality**: FAILED" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ "${{ needs.cli-tests.result }}" == "success" ]; then
+            echo "✅ **CLI Tests**: PASSED" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **CLI Tests**: FAILED" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ "${{ needs.release-build-test.result }}" == "success" ]; then
+            echo "✅ **Release Build Test**: PASSED" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Release Build Test**: FAILED" >> $GITHUB_STEP_SUMMARY
+          fi
