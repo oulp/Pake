@@ -527,6 +527,13 @@ Pake's development can not be without these Hackers. They contributed a lot of c
                 </a>
             </td>
             <td align="center">
+                <a href="https://github.com/oulp">
+                    <img src="https://avatars.githubusercontent.com/u/8519009?v=4" width="90;" alt="oulp"/>
+                    <br />
+                    <sub><b>欧雷</b></sub>
+                </a>
+            </td>
+            <td align="center">
                 <a href="https://github.com/hetz">
                     <img src="https://avatars.githubusercontent.com/u/820141?v=4" width="90;" alt="hetz"/>
                     <br />
